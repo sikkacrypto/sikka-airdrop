@@ -14,3 +14,26 @@ services:
       - privatekey=${PRIVATEKEY}
       - discordtoken=${DISCORDTOKEN}
       - discordguild=${DISCORDGUILD}
+    volumes:
+      - airdrop-data:/data
+
+  nostr-airdrop:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nostr-airdrop
+    command: ["./nostr-airdrop"]
+    restart: unless-stopped
+    deploy:
+      restart_policy:
+        condition: any
+        window: 1h
+    environment:
+      - sikkanode=${SIKKANODE}
+      - nostrrelays=${NOSTRRELAYS}
+      - nsec=${NSEC}
+    volumes:
+      - airdrop-data:/data
+
+volumes:
+  airdrop-data:
