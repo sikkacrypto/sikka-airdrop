@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -115,10 +116,15 @@ type SubmitResponse struct {
 	Status string `json:"status"`
 }
 
+type NodeStatus struct {
+	Tips    []string `json:"tips"`
+	DAGSize int64
+}
+
 // ─── Bot State ────────────────────────────────────────────────────────────────
 
 type Bot struct {
-	nodeURL    string
+	nodeURLs   []string
 	faucetAddr string
 	sk         []byte   // raw private key bytes
 	pkHex      string
@@ -499,7 +505,49 @@ func getAddressInfo(nodeURL, address string) (*AddressInfo, error) {
 	return &info, nil
 }
 
-func getTips(nodeURL string) ([]string, error) {
+func parseNodeURLs(raw string) []string {
+	parts := strings.Split(raw, ",")
+	nodeURLs := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		nodeURL := strings.TrimSpace(part)
+		if nodeURL == "" {
+			continue
+		}
+		if _, ok := seen[nodeURL]; ok {
+			continue
+		}
+		seen[nodeURL] = struct{}{}
+		nodeURLs = append(nodeURLs, nodeURL)
+	}
+	return nodeURLs
+}
+
+func parseStatusIntField(fields map[string]json.RawMessage, keys ...string) int64 {
+	for _, key := range keys {
+		raw, ok := fields[key]
+		if !ok {
+			continue
+		}
+
+		var number int64
+		if err := json.Unmarshal(raw, &number); err == nil {
+			return number
+		}
+
+		var text string
+		if err := json.Unmarshal(raw, &text); err == nil {
+			parsed, err := strconv.ParseInt(strings.TrimSpace(text), 10, 64)
+			if err == nil {
+				return parsed
+			}
+		}
+	}
+
+	return 0
+}
+
+func getNodeStatus(nodeURL string) (*NodeStatus, error) {
 	url := fmt.Sprintf("%s/v1/status", strings.TrimRight(nodeURL, "/"))
 	resp, err := doNodeRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -510,18 +558,82 @@ func getTips(nodeURL string) ([]string, error) {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("GET status %d: %s", resp.StatusCode, body)
 	}
-	var t TipsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&t); err != nil {
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read status body: %w", err)
+	}
+
+	var status NodeStatus
+	if err := json.Unmarshal(body, &status); err != nil {
 		return nil, fmt.Errorf("decode status: %w", err)
 	}
-	if len(t.Tips) < 1 {
+	if len(status.Tips) < 1 {
 		return nil, fmt.Errorf("node status returned no tips")
 	}
-	if len(t.Tips) == 1 {
-		// Mirror node's SelectTips() behaviour: duplicate the single tip.
-		return []string{t.Tips[0], t.Tips[0]}, nil
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil, fmt.Errorf("decode status fields: %w", err)
 	}
-	return t.Tips[:2], nil
+	status.DAGSize = parseStatusIntField(fields,
+		"dag_size",
+		"dagSize",
+		"dag_depth",
+		"dagDepth",
+		"height",
+		"best_height",
+		"bestHeight",
+	)
+
+	return &status, nil
+}
+
+func selectBestNodeURL(nodeURLs []string) (string, error) {
+	if len(nodeURLs) == 0 {
+		return "", fmt.Errorf("no node URLs configured")
+	}
+
+	var selectedURL string
+	var selectedDAGSize int64
+	var lastErr error
+	validCount := 0
+
+	for _, nodeURL := range nodeURLs {
+		status, err := getNodeStatus(nodeURL)
+		if err != nil {
+			log.Printf("skip sikka node %s: %v", nodeURL, err)
+			lastErr = err
+			continue
+		}
+
+		validCount++
+		if selectedURL == "" || status.DAGSize > selectedDAGSize {
+			selectedURL = nodeURL
+			selectedDAGSize = status.DAGSize
+		}
+	}
+
+	if selectedURL == "" {
+		if lastErr == nil {
+			lastErr = fmt.Errorf("no valid node returned status")
+		}
+		return "", lastErr
+	}
+
+	return selectedURL, nil
+}
+
+func getTips(nodeURL string) ([]string, error) {
+	status, err := getNodeStatus(nodeURL)
+	if err != nil {
+		return nil, err
+	}
+	if len(status.Tips) == 1 {
+		// Mirror node's SelectTips() behaviour: duplicate the single tip.
+		return []string{status.Tips[0], status.Tips[0]}, nil
+	}
+	return status.Tips[:2], nil
 }
 
 func getPowQuote(nodeURL string, tx *Transaction) (*PowQuoteResponse, error) {
@@ -574,6 +686,10 @@ func submitTx(nodeURL string, tx *Transaction) (string, error) {
 	return sr.TxID, nil
 }
 
+func (b *Bot) selectNodeURL() (string, error) {
+	return selectBestNodeURL(b.nodeURLs)
+}
+
 // ─── Database ─────────────────────────────────────────────────────────────────
 
 func initDB(db *sql.DB) error {
@@ -620,7 +736,12 @@ func recordClaim(db *sql.DB, userID string) error {
 // ─── Send Airdrop ─────────────────────────────────────────────────────────────
 
 func (b *Bot) sendAirdrop(recipientAddr string) (string, error) {
-	info, err := getAddressInfo(b.nodeURL, b.faucetAddr)
+	nodeURL, err := b.selectNodeURL()
+	if err != nil {
+		return "", fmt.Errorf("select node: %w", err)
+	}
+
+	info, err := getAddressInfo(nodeURL, b.faucetAddr)
 	if err != nil {
 		return "", fmt.Errorf("fetch faucet balance: %w", err)
 	}
@@ -649,7 +770,7 @@ func (b *Bot) sendAirdrop(recipientAddr string) (string, error) {
 	}
 
 	// Get 2 tips as parents
-	tips, err := getTips(b.nodeURL)
+	tips, err := getTips(nodeURL)
 	if err != nil {
 		return "", err
 	}
@@ -691,7 +812,7 @@ func (b *Bot) sendAirdrop(recipientAddr string) (string, error) {
 		}
 	}
 
-	quote, err := getPowQuote(b.nodeURL, tx)
+	quote, err := getPowQuote(nodeURL, tx)
 	if err != nil {
 		return "", fmt.Errorf("quote PoW: %w", err)
 	}
@@ -706,7 +827,7 @@ func (b *Bot) sendAirdrop(recipientAddr string) (string, error) {
 	txIDRaw := computeTxIDRaw(tx)
 	tx.ID = hex.EncodeToString(txIDRaw[:])
 
-	txID, err := submitTx(b.nodeURL, tx)
+	txID, err := submitTx(nodeURL, tx)
 	if err != nil {
 		return "", fmt.Errorf("submit tx: %w", err)
 	}
@@ -781,7 +902,14 @@ func (b *Bot) handleMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 
 	// Get balance info for the success message
-	info, _ := getAddressInfo(b.nodeURL, b.faucetAddr)
+	nodeURL, err := b.selectNodeURL()
+	if err != nil {
+		log.Printf("select node for balance info: %v", err)
+	}
+	var info *AddressInfo
+	if nodeURL != "" {
+		info, _ = getAddressInfo(nodeURL, b.faucetAddr)
+	}
 	sentAmount := int64(0)
 	if info != nil {
 		sentAmount = info.Balance / airdropDivisor
@@ -808,13 +936,13 @@ func formatSikka(chillar int64) string {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 func main() {
-	nodeURL := os.Getenv("sikkanode")
+	nodeURLs := parseNodeURLs(os.Getenv("sikkanode"))
 	privKeyHex := os.Getenv("privatekey")
 	discordToken := os.Getenv("discordtoken")
 	guildID := os.Getenv("discordguild")
 
-	if nodeURL == "" {
-		log.Fatal("env var 'sikkanode' is required")
+	if len(nodeURLs) == 0 {
+		log.Fatal("env var 'sikkanode' is required and must contain at least one URL")
 	}
 	if privKeyHex == "" {
 		log.Fatal("env var 'privatekey' is required")
@@ -825,6 +953,12 @@ func main() {
 	if guildID == "" {
 		log.Fatal("env var 'discordguild' is required")
 	}
+
+	selectedNodeURL, err := selectBestNodeURL(nodeURLs)
+	if err != nil {
+		log.Fatalf("select sikka node: %v", err)
+	}
+	log.Printf("using sikka node: %s", selectedNodeURL)
 
 	// Load wallet
 	skBytes, pkHex, faucetAddr, err := loadPrivateKey(privKeyHex)
@@ -844,7 +978,7 @@ func main() {
 	}
 
 	bot := &Bot{
-		nodeURL:    nodeURL,
+		nodeURLs:   nodeURLs,
 		faucetAddr: faucetAddr,
 		sk:         skBytes,
 		pkHex:      pkHex,

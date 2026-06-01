@@ -5,7 +5,9 @@ A Discord bot that handles Sikka cryptocurrency airdrops.
 
 Required Environment Variables
 -------------------------------
-  sikkanode       - URL of the Sikka node (e.g. http://localhost:8080)
+  sikkanode       - Sikka node URL, or a comma-separated list of node URLs.
+                    The bot probes /v1/status and picks the valid node with the
+                    highest reported DAG size.
   privatekey      - Hex-encoded private key used to sign transactions
   discordtoken    - Discord bot token
   discordguild    - Discord server (guild) ID to restrict the bot to
@@ -35,7 +37,7 @@ Run
 ---
   docker run -d \
     --name airdrop \
-    -e sikkanode=http://your-node-url:8080 \
+    -e sikkanode=http://node1:8080,http://node2:8080,http://node3:8080 \
     -e privatekey=your-hex-private-key \
     -e discordtoken=your-discord-bot-token \
     -e discordguild=1508845537737048206 \
