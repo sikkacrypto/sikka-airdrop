@@ -1,0 +1,17 @@
+services:
+  airdrop:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: airdrop
+    restart: unless-stopped
+    volumes:
+      - airdrop-data:/data
+    environment:
+      - sikkanode=${SIKKANODE}
+      - privatekey=${PRIVATEKEY}
+      - discordtoken=${DISCORDTOKEN}
+      - discordguild=${DISCORDGUILD}
+
+volumes:
+  airdrop-data:
