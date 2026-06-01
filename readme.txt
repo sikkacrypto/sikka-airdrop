@@ -20,7 +20,7 @@ Node API Compatibility
   This bot expects the current node HTTP API and uses these routes:
 
   GET  /v1/address/{address}
-  GET  /v1/dag/tips
+  GET  /v1/status (uses the tips field from the status response)
   POST /v1/tx/pow-quote
   POST /v1/tx/submit
 

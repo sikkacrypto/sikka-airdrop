@@ -500,22 +500,22 @@ func getAddressInfo(nodeURL, address string) (*AddressInfo, error) {
 }
 
 func getTips(nodeURL string) ([]string, error) {
-	url := fmt.Sprintf("%s/v1/dag/tips", strings.TrimRight(nodeURL, "/"))
+	url := fmt.Sprintf("%s/v1/status", strings.TrimRight(nodeURL, "/"))
 	resp, err := doNodeRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("GET tips: %w", err)
+		return nil, fmt.Errorf("GET status: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GET tips %d: %s", resp.StatusCode, body)
+		return nil, fmt.Errorf("GET status %d: %s", resp.StatusCode, body)
 	}
 	var t TipsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&t); err != nil {
-		return nil, fmt.Errorf("decode tips: %w", err)
+		return nil, fmt.Errorf("decode status: %w", err)
 	}
 	if len(t.Tips) < 1 {
-		return nil, fmt.Errorf("node returned no tips")
+		return nil, fmt.Errorf("node status returned no tips")
 	}
 	if len(t.Tips) == 1 {
 		// Mirror node's SelectTips() behaviour: duplicate the single tip.
