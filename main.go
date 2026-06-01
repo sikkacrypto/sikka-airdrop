@@ -85,10 +85,10 @@ type UTXO struct {
 }
 
 type AddressInfo struct {
-	Address  string `json:"address"`
-	Balance  int64  `json:"balance"`
-	Sikka    string `json:"sikka"`
-	UTXOs    []UTXO `json:"utxos"`
+	Address   string `json:"address"`
+	Balance   int64  `json:"balance"`
+	UTXOCount int    `json:"utxo_count"`
+	UTXOs     []UTXO `json:"utxos"`
 }
 
 type TipsResponse struct {
@@ -101,7 +101,13 @@ type PowQuoteRequest struct {
 }
 
 type PowQuoteResponse struct {
-	RequiredBits int `json:"required_bits"`
+	RequiredBits      int `json:"required_bits"`
+	BaseBits          int `json:"base_bits"`
+	RecentCount       int `json:"recent_count"`
+	CongestionBuckets int `json:"congestion_buckets"`
+	WindowSeconds     int `json:"window_seconds"`
+	BucketTx          int `json:"bucket_tx"`
+	BucketBits        int `json:"bucket_bits"`
 }
 
 type SubmitResponse struct {
@@ -480,6 +486,15 @@ func getAddressInfo(nodeURL, address string) (*AddressInfo, error) {
 	var info AddressInfo
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
 		return nil, fmt.Errorf("decode address info: %w", err)
+	}
+	if info.UTXOs == nil {
+		info.UTXOs = []UTXO{}
+	}
+	if info.Address != "" && info.Address != address {
+		return nil, fmt.Errorf("address response mismatch: requested %s, got %s", address, info.Address)
+	}
+	if info.UTXOCount != 0 && info.UTXOCount != len(info.UTXOs) {
+		return nil, fmt.Errorf("address response mismatch: utxo_count=%d, utxos=%d", info.UTXOCount, len(info.UTXOs))
 	}
 	return &info, nil
 }

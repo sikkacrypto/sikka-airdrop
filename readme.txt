@@ -15,6 +15,18 @@ Required Environment Variables
   then right-click the server name or channel name and select "Copy ID".
   Example URL: discord.com/channels/{discordguild}/{discordchannel}
 
+Node API Compatibility
+----------------------
+  This bot expects the current node HTTP API and uses these routes:
+
+  GET  /v1/address/{address}
+  GET  /v1/dag/tips
+  POST /v1/tx/pow-quote
+  POST /v1/tx/submit
+
+  The address response should include: address, balance, utxo_count, utxos.
+  The PoW quote response should include: required_bits.
+
 Build
 -----
   docker build -t airdrop .
