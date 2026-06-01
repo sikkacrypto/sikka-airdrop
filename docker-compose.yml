@@ -5,13 +5,12 @@ services:
       dockerfile: Dockerfile
     container_name: airdrop
     restart: unless-stopped
-    volumes:
-      - airdrop-data:/data
+    deploy:
+      restart_policy:
+        condition: any
+        window: 1h
     environment:
       - sikkanode=${SIKKANODE}
       - privatekey=${PRIVATEKEY}
       - discordtoken=${DISCORDTOKEN}
       - discordguild=${DISCORDGUILD}
-
-volumes:
-  airdrop-data:
