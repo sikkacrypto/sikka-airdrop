@@ -103,11 +103,6 @@ func main() {
 		recentIDs: make(map[string]int64),
 	}
 
-	log.Printf("nostr bot pubkey: %s", cfg.NostrPubKey)
-	log.Printf("nostr bot npub: %s", cfg.NostrNPub)
-	log.Printf("treasury address: %s", treasury.Address)
-	log.Printf("using sikka node: %s", cfg.SelectedNode)
-
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -307,9 +302,7 @@ func initDB(db *sql.DB) error {
 func (b *Bot) run(ctx context.Context) error {
 	go b.flushOutboxLoop(ctx)
 	go func() {
-		if err := b.flushOutbox(ctx); err != nil {
-			log.Printf("initial outbox flush: %v", err)
-		}
+		_ = b.flushOutbox(ctx)
 	}()
 
 	since := nostr.Timestamp(time.Now().Add(-b.cfg.EventMaxAge).Unix())
@@ -323,7 +316,6 @@ func (b *Bot) run(ctx context.Context) error {
 		Since: &since,
 	}
 
-	log.Printf("starting relay subscriptions for %d relays", len(b.cfg.RelayURLs))
 	publicReady := make(chan (<-chan nostr.RelayEvent), 1)
 	dmReady := make(chan (<-chan nostr.RelayEvent), 1)
 	go func() {
@@ -347,10 +339,6 @@ func (b *Bot) run(ctx context.Context) error {
 			}
 			publicEvents = ready
 			publicReady = nil
-			log.Printf("nostr public subscription ready")
-			if dmReady == nil {
-				log.Printf("subscribed to %d relays for public notes and DMs", len(b.cfg.RelayURLs))
-			}
 		case ready, ok := <-dmReady:
 			if !ok {
 				dmReady = nil
@@ -358,10 +346,6 @@ func (b *Bot) run(ctx context.Context) error {
 			}
 			dmEvents = ready
 			dmReady = nil
-			log.Printf("nostr dm subscription ready")
-			if publicReady == nil {
-				log.Printf("subscribed to %d relays for public notes and DMs", len(b.cfg.RelayURLs))
-			}
 		case relayEvent, ok := <-publicEvents:
 			if !ok {
 				publicEvents = nil
@@ -370,9 +354,7 @@ func (b *Bot) run(ctx context.Context) error {
 				}
 				continue
 			}
-			if err := b.handleRelayEvent(ctx, relayEvent); err != nil {
-				log.Printf("handle public event: %v", err)
-			}
+			_ = b.handleRelayEvent(ctx, relayEvent)
 		case relayEvent, ok := <-dmEvents:
 			if !ok {
 				dmEvents = nil
@@ -381,9 +363,7 @@ func (b *Bot) run(ctx context.Context) error {
 				}
 				continue
 			}
-			if err := b.handleRelayEvent(ctx, relayEvent); err != nil {
-				log.Printf("handle dm event: %v", err)
-			}
+			_ = b.handleRelayEvent(ctx, relayEvent)
 		}
 	}
 }
@@ -396,9 +376,6 @@ func (b *Bot) handleRelayEvent(ctx context.Context, relayEvent nostr.RelayEvent)
 	if relayEvent.Relay != nil {
 		relayURL = relayEvent.Relay.URL
 	}
-	if relayEvent.Event.Kind == nostr.KindEncryptedDirectMessage {
-		log.Printf("nostr recv: kind=%d id=%s from=%s relay=%s created_at=%d", relayEvent.Event.Kind, relayEvent.Event.ID, shortNPub(relayEvent.Event.PubKey), relayURL, relayEvent.Event.CreatedAt.Time().Unix())
-	}
 	return b.handleEvent(ctx, relayURL, relayEvent.Event)
 }
 
@@ -408,7 +385,6 @@ func (b *Bot) handleEvent(ctx context.Context, relayURL string, event *nostr.Eve
 	}
 	seen := b.trackRecentEvent(event)
 	if !seen {
-		log.Printf("nostr skip duplicate: kind=%d id=%s from=%s relay=%s", event.Kind, event.ID, shortNPub(event.PubKey), relayURL)
 		return nil
 	}
 	valid, err := event.CheckSignature()
@@ -419,7 +395,6 @@ func (b *Bot) handleEvent(ctx context.Context, relayURL string, event *nostr.Eve
 		return fmt.Errorf("invalid signature")
 	}
 	if !isFresh(event, b.cfg.EventMaxAge) {
-		log.Printf("nostr skip stale: kind=%d id=%s from=%s age=%s", event.Kind, event.ID, shortNPub(event.PubKey), time.Since(event.CreatedAt.Time()).Round(time.Second))
 		return fmt.Errorf("stale event")
 	}
 
@@ -432,11 +407,6 @@ func (b *Bot) handleEvent(ctx context.Context, relayURL string, event *nostr.Eve
 		recipientPubKey, err := b.resolveTipRecipient(ctx, event, explicitRecipient)
 		if err != nil {
 			return err
-		}
-		if hasAmount {
-			log.Printf("nostr public tip: id=%s from=%s to=%s amount=%s relay=%s", event.ID, shortNPub(event.PubKey), shortNPub(recipientPubKey), formatSikka(amount), relayURL)
-		} else {
-			log.Printf("nostr public tip: id=%s from=%s to=%s amount=default-1%% relay=%s", event.ID, shortNPub(event.PubKey), shortNPub(recipientPubKey), relayURL)
 		}
 		claimed, err := b.claimEvent(event, relayURL)
 		if err != nil || !claimed {
@@ -452,7 +422,6 @@ func (b *Bot) handleEvent(ctx context.Context, relayURL string, event *nostr.Eve
 		if err != nil {
 			return fmt.Errorf("decrypt dm: %w", err)
 		}
-		log.Printf("nostr dm decrypted: id=%s from=%s relay=%s text=%q", event.ID, shortNPub(event.PubKey), relayURL, previewText(strings.TrimSpace(message), 120))
 		claimed, err := b.claimEvent(event, relayURL)
 		if err != nil || !claimed {
 			return err
@@ -651,12 +620,10 @@ func (b *Bot) claimEvent(event *nostr.Event, relayURL string) (bool, error) {
 	)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			log.Printf("nostr processed duplicate: kind=%d id=%s from=%s relay=%s", event.Kind, event.ID, shortNPub(event.PubKey), relayURL)
 			return false, nil
 		}
 		return false, err
 	}
-	log.Printf("nostr claim accepted: kind=%d id=%s from=%s relay=%s", event.Kind, event.ID, shortNPub(event.PubKey), relayURL)
 	return true, nil
 }
 
@@ -723,7 +690,6 @@ func (b *Bot) processTip(ctx context.Context, event *nostr.Event, recipientPubKe
 		if amount <= 0 {
 			return fmt.Errorf("available balance too low for default 1%% tip")
 		}
-		log.Printf("nostr public tip default amount: id=%s from=%s available=%s computed=%s", event.ID, shortNPub(event.PubKey), formatSikka(sender.Available), formatSikka(amount))
 	}
 	if amount < b.cfg.MinTipAmount {
 		return fmt.Errorf("tip amount below minimum")
@@ -759,6 +725,7 @@ func (b *Bot) processTip(ctx context.Context, event *nostr.Event, recipientPubKe
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	log.Printf("nostr funds sent: type=tip amount=%s from=%s to=%s event_id=%s", formatSikka(amount), shortNPub(event.PubKey), shortNPub(recipient.PubKey), event.ID)
 
 	if err := b.queueDM(recipientPubKey, "tip-received", fmt.Sprintf("You received %s SIKKA from %s.", formatSikka(amount), shortNPub(event.PubKey))); err != nil {
 		return err
@@ -774,7 +741,6 @@ func (b *Bot) processDM(ctx context.Context, event *nostr.Event, plaintext strin
 		return err
 	}
 	command := strings.TrimSpace(plaintext)
-	log.Printf("nostr dm command: id=%s from=%s command=%q", event.ID, shortNPub(event.PubKey), previewText(command, 120))
 	if command == "" {
 		return b.queueAndFlush(ctx, event.PubKey, "help", helpMessage())
 	}
@@ -907,6 +873,7 @@ func (b *Bot) handleWithdraw(ctx context.Context, pubKey, requestEventID string,
 	if err := b.completeWithdrawal(withdrawalID, txID); err != nil {
 		return err
 	}
+	log.Printf("nostr funds sent: type=withdrawal amount=%s from=%s to=%s txid=%s", formatSikka(amount), shortNPub(pubKey), normalized, txID)
 	return b.queueAndFlush(ctx, pubKey, "withdrawal", fmt.Sprintf("Withdrawal sent: %s SIKKA\nAddress: %s\nTx: %s", formatSikka(amount), normalized, txID))
 }
 
@@ -1020,6 +987,7 @@ func (b *Bot) syncDeposits(pubKey string) (int64, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	log.Printf("nostr funds sent: type=deposit-sweep amount=%s from=%s to=%s", formatSikka(delta), shortNPub(pubKey), b.treasury.Address)
 	return delta, nil
 }
 
@@ -1033,7 +1001,6 @@ func (b *Bot) decryptDM(event *nostr.Event) (string, error) {
 
 func (b *Bot) queueDM(recipientPubKey, messageType, payload string) error {
 	now := time.Now().Unix()
-	log.Printf("nostr outbox queue: to=%s type=%s payload=%q", shortNPub(recipientPubKey), messageType, previewText(payload, 120))
 	_, err := b.db.Exec(`INSERT INTO dm_outbox (recipient_pubkey, message_type, payload, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?)`, recipientPubKey, messageType, payload, now, now)
 	return err
 }
@@ -1053,9 +1020,7 @@ func (b *Bot) flushOutboxLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := b.flushOutbox(ctx); err != nil {
-				log.Printf("flush outbox: %v", err)
-			}
+			_ = b.flushOutbox(ctx)
 		}
 	}
 }
@@ -1102,13 +1067,10 @@ func (b *Bot) flushOutbox(ctx context.Context) error {
 		if !claimed {
 			continue
 		}
-		log.Printf("nostr outbox send: row=%d to=%s type=%s payload=%q", entry.id, shortNPub(entry.recipientPubKey), entry.messageType, previewText(entry.payload, 120))
 		if err := b.sendDM(ctx, entry.recipientPubKey, entry.payload); err != nil {
-			log.Printf("nostr outbox failed: row=%d to=%s type=%s err=%v", entry.id, shortNPub(entry.recipientPubKey), entry.messageType, err)
 			_, _ = b.db.Exec(`UPDATE dm_outbox SET status = 'failed', updated_at = ? WHERE id = ?`, time.Now().Unix(), entry.id)
 			continue
 		}
-		log.Printf("nostr outbox sent: row=%d to=%s type=%s", entry.id, shortNPub(entry.recipientPubKey), entry.messageType)
 		_, _ = b.db.Exec(`UPDATE dm_outbox SET status = 'sent', updated_at = ? WHERE id = ?`, time.Now().Unix(), entry.id)
 	}
 	return nil
@@ -1144,16 +1106,13 @@ func (b *Bot) sendDM(ctx context.Context, recipientPubKey, message string) error
 	if err := event.Sign(b.cfg.NostrSecret); err != nil {
 		return err
 	}
-	log.Printf("nostr dm publish: event_id=%s to=%s text=%q", event.ID, shortNPub(recipientPubKey), previewText(message, 120))
 	results := b.pool.PublishMany(ctx, b.cfg.RelayURLs, event)
 	success := false
 	for result := range results {
 		if result.Error == nil {
-			log.Printf("nostr dm publish ok: event_id=%s relay=%s", event.ID, result.RelayURL)
 			success = true
 			continue
 		}
-		log.Printf("nostr dm publish failed: event_id=%s relay=%s err=%v", event.ID, result.RelayURL, result.Error)
 	}
 	if !success {
 		return fmt.Errorf("publish failed on all relays")
