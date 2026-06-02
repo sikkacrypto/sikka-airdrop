@@ -810,7 +810,7 @@ func (b *Bot) publishTipReceipt(ctx context.Context, tipEvent *nostr.Event, reci
 	if tipEvent == nil {
 		return
 	}
-	message := fmt.Sprintf("Tip sent: %s to %s\nTx: %s\n%s", formatSikkaDisplay(amount), fullNPub(recipientPubKey), txID, buildSikkaTxURL(txID))
+	message := fmt.Sprintf("Tip sent: %s to %s\nTx: %s\n%s\nMessage me to access your tips and balance.", formatSikkaDisplay(amount), fullNPub(recipientPubKey), txID, buildSikkaTxURL(txID))
 	_ = b.publishTextNote(ctx, message, buildReplyTags(tipEvent, recipientPubKey))
 }
 
