@@ -7,10 +7,10 @@ This repository now also includes a separate Nostr worker process:
 
   ./nostr-airdrop
 
-The Nostr worker keeps its own SQLite ledger and uses NSEC as both:
+The Nostr worker uses SQLite for idempotency and message state, and uses NSEC as both:
 
   - the bot's Nostr identity
-  - the deterministic root seed source for custodial SIKKA wallets
+  - the deterministic root seed source for per-user SIKKA wallets
 
 Per-user SIKKA wallets are derived from the NSEC seed material plus the user's
 Nostr public key. The implementation hashes that concatenated material to a
@@ -110,12 +110,14 @@ or only:
 
 and that note is posted as a reply to another Nostr event, the worker resolves
 the recipient from the parent event author. If no amount is provided, the
-worker uses 1% of the sender's available internal balance. If the parent event
-cannot be resolved from reply tags, the command must include an explicit npub.
+worker uses 1% of the sender's available on-chain wallet balance. If the parent
+event cannot be resolved from reply tags, the command must include an explicit
+npub.
 
 Successful public tips also trigger a public in-thread receipt reply from the
-bot. Public tips are sent on-chain to the recipient's deterministic deposit
-wallet, and the receipt includes the txid plus a sikka.click transaction link.
+bot. Public tips are sent on-chain from the sender's deterministic wallet to
+the recipient's deterministic wallet, and the receipt includes the txid plus a
+sikka.click transaction link.
 
 Nostr Intake Safety Rules
 ------------------------

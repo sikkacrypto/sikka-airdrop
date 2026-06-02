@@ -60,7 +60,6 @@ type Bot struct {
 	cfg      Config
 	db       *sql.DB
 	pool     *nostr.SimplePool
-	treasury *Wallet
 	recentMu  sync.Mutex
 	recentIDs map[string]int64
 	outboxMu  sync.Mutex
@@ -87,11 +86,6 @@ func main() {
 		log.Fatalf("init db: %v", err)
 	}
 
-	treasury, err := deriveServiceWallet(cfg.RootSeed)
-	if err != nil {
-		log.Fatalf("derive treasury wallet: %v", err)
-	}
-
 	pool := nostr.NewSimplePool(context.Background(), nostr.WithPenaltyBox())
 	defer pool.Close("shutdown")
 
@@ -99,7 +93,6 @@ func main() {
 		cfg:      cfg,
 		db:       db,
 		pool:     pool,
-		treasury: treasury,
 		recentIDs: make(map[string]int64),
 	}
 
@@ -683,26 +676,40 @@ func (b *Bot) ensureUser(pubKey string) (*UserRecord, error) {
 	return rec, nil
 }
 
+func (b *Bot) getWalletInfo(pubKey string) (*UserRecord, *AddressInfo, error) {
+	user, err := b.ensureUser(pubKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := getAddressInfo(b.cfg.SelectedNode, user.DepositAddress)
+	if err != nil {
+		return nil, nil, err
+	}
+	return user, info, nil
+}
+
+func (b *Bot) getUserWallet(pubKey string) (*Wallet, error) {
+	return deriveUserWallet(b.cfg.RootSeed, pubKey)
+}
+
 func (b *Bot) processTip(ctx context.Context, event *nostr.Event, recipientPubKey string, amount int64, hasAmount bool) error {
 	if event.PubKey == recipientPubKey {
 		return fmt.Errorf("sender and recipient cannot match")
 	}
-	if _, err := b.ensureUser(event.PubKey); err != nil {
+	sender, senderInfo, err := b.getWalletInfo(event.PubKey)
+	if err != nil {
+		return err
+	}
+	senderWallet, err := b.getUserWallet(event.PubKey)
+	if err != nil {
 		return err
 	}
 	recipient, err := b.ensureUser(recipientPubKey)
 	if err != nil {
 		return err
 	}
-	if _, err := b.syncDeposits(event.PubKey); err != nil {
-		return fmt.Errorf("sync sender deposits: %w", err)
-	}
-	sender, err := b.ensureUser(event.PubKey)
-	if err != nil {
-		return err
-	}
 	if !hasAmount {
-		amount = sender.Available / 100
+		amount = senderInfo.Balance / 100
 		if amount <= 0 {
 			return fmt.Errorf("available balance too low for default 1%% tip")
 		}
@@ -713,21 +720,19 @@ func (b *Bot) processTip(ctx context.Context, event *nostr.Event, recipientPubKe
 	if amount > b.cfg.MaxTipAmount {
 		return fmt.Errorf("tip amount above maximum")
 	}
-
-	if err := b.reserveTip(ctx, event.ID, event.PubKey, recipientPubKey, amount); err != nil {
-		return err
+	if senderInfo.Balance < amount {
+		return fmt.Errorf("insufficient balance")
 	}
 
-	txID, err := sendExactAmount(b.cfg.SelectedNode, b.treasury, recipient.DepositAddress, amount)
+	txID, err := sendExactAmount(b.cfg.SelectedNode, senderWallet, recipient.DepositAddress, amount)
 	if err != nil {
-		if refundErr := b.failTip(event.ID, event.PubKey, amount); refundErr != nil {
-			return fmt.Errorf("tip send failed: %v; refund failed: %w", err, refundErr)
-		}
 		return fmt.Errorf("tip send failed: %w", err)
 	}
+	now := time.Now().Unix()
+	_, _ = b.db.Exec(`INSERT OR REPLACE INTO tips (event_id, sender_pubkey, recipient_pubkey, amount, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`, event.ID, event.PubKey, recipientPubKey, amount, "submitted", now)
 
-	if err := b.completeTip(event.ID, event.PubKey); err != nil {
-		return err
+	if sender != nil {
+		_ = sender
 	}
 	log.Printf("nostr funds sent: type=tip amount=%s from=%s to=%s txid=%s", formatSikka(amount), shortNPub(event.PubKey), shortNPub(recipient.PubKey), txID)
 	b.publishTipReceipt(ctx, event, recipient.PubKey, amount, txID)
@@ -859,18 +864,11 @@ func (b *Bot) processDM(ctx context.Context, event *nostr.Event, plaintext strin
 }
 
 func (b *Bot) handleBalance(ctx context.Context, pubKey string) error {
-	credited, err := b.syncDeposits(pubKey)
+	rec, info, err := b.getWalletInfo(pubKey)
 	if err != nil {
 		return err
 	}
-	rec, err := b.ensureUser(pubKey)
-	if err != nil {
-		return err
-	}
-	message := fmt.Sprintf("Available: %s SIKKA\nPending: %s SIKKA\nDeposit address: %s", formatSikka(rec.Available), formatSikka(rec.Pending), rec.DepositAddress)
-	if credited > 0 {
-		message += fmt.Sprintf("\nSwept and credited: %s SIKKA", formatSikka(credited))
-	}
+	message := fmt.Sprintf("Available: %s SIKKA\nDeposit address: %s", formatSikka(info.Balance), rec.DepositAddress)
 	if rec.DefaultWithdrawAddress.Valid {
 		message += fmt.Sprintf("\nDefault withdraw address: %s", rec.DefaultWithdrawAddress.String)
 	}
@@ -878,18 +876,11 @@ func (b *Bot) handleBalance(ctx context.Context, pubKey string) error {
 }
 
 func (b *Bot) handleDeposit(ctx context.Context, pubKey string) error {
-	credited, err := b.syncDeposits(pubKey)
+	rec, info, err := b.getWalletInfo(pubKey)
 	if err != nil {
 		return err
 	}
-	rec, err := b.ensureUser(pubKey)
-	if err != nil {
-		return err
-	}
-	message := fmt.Sprintf("Deposit to: %s", rec.DepositAddress)
-	if credited > 0 {
-		message += fmt.Sprintf("\nSwept and credited: %s SIKKA", formatSikka(credited))
-	}
+	message := fmt.Sprintf("Deposit to: %s\nCurrent on-chain balance: %s SIKKA", rec.DepositAddress, formatSikka(info.Balance))
 	return b.queueAndFlush(ctx, pubKey, "deposit", message)
 }
 
@@ -910,10 +901,11 @@ func (b *Bot) handleWithdraw(ctx context.Context, pubKey, requestEventID string,
 		return b.queueAndFlush(ctx, pubKey, "error", "Usage: withdraw all <address> | withdraw <amount> <address>")
 	}
 
-	if _, err := b.syncDeposits(pubKey); err != nil {
+	user, info, err := b.getWalletInfo(pubKey)
+	if err != nil {
 		return err
 	}
-	user, err := b.ensureUser(pubKey)
+	wallet, err := b.getUserWallet(pubKey)
 	if err != nil {
 		return err
 	}
@@ -921,7 +913,7 @@ func (b *Bot) handleWithdraw(ctx context.Context, pubKey, requestEventID string,
 	var amount int64
 	var address string
 	if strings.EqualFold(args[0], "all") {
-		amount = user.Available
+		amount = info.Balance
 		if len(args) > 1 {
 			address = args[1]
 		} else if user.DefaultWithdrawAddress.Valid {
@@ -941,27 +933,20 @@ func (b *Bot) handleWithdraw(ctx context.Context, pubKey, requestEventID string,
 	if amount <= 0 {
 		return b.queueAndFlush(ctx, pubKey, "error", "No withdrawable balance available")
 	}
+	if info.Balance < amount {
+		return b.queueAndFlush(ctx, pubKey, "error", "Insufficient on-chain balance")
+	}
 	normalized, err := validateAddress(address)
 	if err != nil {
 		return b.queueAndFlush(ctx, pubKey, "error", fmt.Sprintf("Invalid withdraw address: %v", err))
 	}
 
-	withdrawalID, err := b.reserveWithdrawal(ctx, requestEventID, pubKey, normalized, amount)
+	txID, err := sendExactAmount(b.cfg.SelectedNode, wallet, normalized, amount)
 	if err != nil {
-		return b.queueAndFlush(ctx, pubKey, "error", err.Error())
-	}
-
-	txID, err := sendExactAmount(b.cfg.SelectedNode, b.treasury, normalized, amount)
-	if err != nil {
-		if refundErr := b.failWithdrawal(withdrawalID, pubKey, amount); refundErr != nil {
-			return fmt.Errorf("withdrawal send failed: %v; refund failed: %w", err, refundErr)
-		}
 		return b.queueAndFlush(ctx, pubKey, "error", fmt.Sprintf("Withdrawal failed: %v", err))
 	}
-
-	if err := b.completeWithdrawal(withdrawalID, txID); err != nil {
-		return err
-	}
+	now := time.Now().Unix()
+	_, _ = b.db.Exec(`INSERT OR REPLACE INTO withdrawals (request_event_id, pubkey, address, amount, txid, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, requestEventID, pubKey, normalized, amount, txID, "completed", now, now)
 	log.Printf("nostr funds sent: type=withdrawal amount=%s from=%s to=%s txid=%s", formatSikka(amount), shortNPub(pubKey), normalized, txID)
 	return b.queueAndFlush(ctx, pubKey, "withdrawal", fmt.Sprintf("Withdrawal sent: %s SIKKA\nAddress: %s\nTx: %s", formatSikka(amount), normalized, txID))
 }
@@ -1042,42 +1027,7 @@ func (b *Bot) failWithdrawal(withdrawalID int64, pubKey string, amount int64) er
 }
 
 func (b *Bot) syncDeposits(pubKey string) (int64, error) {
-	user, err := b.ensureUser(pubKey)
-	if err != nil {
-		return 0, err
-	}
-	info, err := getAddressInfo(b.cfg.SelectedNode, user.DepositAddress)
-	if err != nil {
-		return 0, err
-	}
-	if info.Balance <= user.DepositCredited {
-		return 0, nil
-	}
-	wallet, err := deriveUserWallet(b.cfg.RootSeed, pubKey)
-	if err != nil {
-		return 0, err
-	}
-	delta := info.Balance - user.DepositCredited
-	if _, err := sendExactAmount(b.cfg.SelectedNode, wallet, b.treasury.Address, info.Balance); err != nil {
-		return 0, err
-	}
-	now := time.Now().Unix()
-	tx, err := b.db.BeginTx(context.Background(), nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE nostr_users SET deposit_credited = ?, created_at = created_at WHERE pubkey = ?`, info.Balance, pubKey); err != nil {
-		return 0, err
-	}
-	if _, err := tx.Exec(`UPDATE balances SET available = available + ?, updated_at = ? WHERE pubkey = ?`, delta, now, pubKey); err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	log.Printf("nostr funds sent: type=deposit-sweep amount=%s from=%s to=%s", formatSikka(delta), shortNPub(pubKey), b.treasury.Address)
-	return delta, nil
+	return 0, nil
 }
 
 func (b *Bot) decryptDM(event *nostr.Event) (string, error) {
