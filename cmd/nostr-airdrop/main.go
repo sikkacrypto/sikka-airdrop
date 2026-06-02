@@ -734,14 +734,14 @@ func (b *Bot) processTip(ctx context.Context, event *nostr.Event, recipientPubKe
 	if sender != nil {
 		_ = sender
 	}
-	log.Printf("nostr funds sent: type=tip amount=%s from=%s to=%s txid=%s", formatSikka(amount), shortNPub(event.PubKey), shortNPub(recipient.PubKey), txID)
+	log.Printf("nostr funds sent: type=tip amount=%s from=%s to=%s txid=%s", formatSikkaDisplay(amount), shortNPub(event.PubKey), shortNPub(recipient.PubKey), txID)
 	b.publishTipReceipt(ctx, event, recipient.PubKey, amount, txID)
 
 	txURL := buildSikkaTxURL(txID)
-	if err := b.queueDM(recipientPubKey, "tip-received", fmt.Sprintf("You received %s SIKKA from %s.\nTx: %s\nView: %s", formatSikka(amount), shortNPub(event.PubKey), txID, txURL)); err != nil {
+	if err := b.queueDM(recipientPubKey, "tip-received", fmt.Sprintf("You received %s from %s.\nTx: %s\nView: %s", formatSikkaDisplay(amount), shortNPub(event.PubKey), txID, txURL)); err != nil {
 		return err
 	}
-	if err := b.queueDM(event.PubKey, "tip-sent", fmt.Sprintf("You sent %s SIKKA to %s.\nTx: %s\nView: %s", formatSikka(amount), shortNPub(recipient.PubKey), txID, txURL)); err != nil {
+	if err := b.queueDM(event.PubKey, "tip-sent", fmt.Sprintf("You sent %s to %s.\nTx: %s\nView: %s", formatSikkaDisplay(amount), shortNPub(recipient.PubKey), txID, txURL)); err != nil {
 		return err
 	}
 	return b.flushOutbox(ctx)
@@ -810,7 +810,7 @@ func (b *Bot) publishTipReceipt(ctx context.Context, tipEvent *nostr.Event, reci
 	if tipEvent == nil {
 		return
 	}
-	message := fmt.Sprintf("Tip sent: %s SIKKA to %s\nTx: %s\n%s", formatSikka(amount), fullNPub(recipientPubKey), txID, buildSikkaTxURL(txID))
+	message := fmt.Sprintf("Tip sent: %s to %s\nTx: %s\n%s", formatSikkaDisplay(amount), fullNPub(recipientPubKey), txID, buildSikkaTxURL(txID))
 	_ = b.publishTextNote(ctx, message, buildReplyTags(tipEvent, recipientPubKey))
 }
 
@@ -868,7 +868,7 @@ func (b *Bot) handleBalance(ctx context.Context, pubKey string) error {
 	if err != nil {
 		return err
 	}
-	message := fmt.Sprintf("Available: %s SIKKA\nDeposit address: %s", formatSikka(info.Balance), rec.DepositAddress)
+	message := fmt.Sprintf("Available: %s\nDeposit address: %s", formatSikkaDisplay(info.Balance), rec.DepositAddress)
 	if rec.DefaultWithdrawAddress.Valid {
 		message += fmt.Sprintf("\nDefault withdraw address: %s", rec.DefaultWithdrawAddress.String)
 	}
@@ -880,7 +880,7 @@ func (b *Bot) handleDeposit(ctx context.Context, pubKey string) error {
 	if err != nil {
 		return err
 	}
-	message := fmt.Sprintf("Deposit to: %s\nCurrent on-chain balance: %s SIKKA", rec.DepositAddress, formatSikka(info.Balance))
+	message := fmt.Sprintf("Deposit to: %s\nCurrent on-chain balance: %s", rec.DepositAddress, formatSikkaDisplay(info.Balance))
 	return b.queueAndFlush(ctx, pubKey, "deposit", message)
 }
 
@@ -947,8 +947,8 @@ func (b *Bot) handleWithdraw(ctx context.Context, pubKey, requestEventID string,
 	}
 	now := time.Now().Unix()
 	_, _ = b.db.Exec(`INSERT OR REPLACE INTO withdrawals (request_event_id, pubkey, address, amount, txid, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, requestEventID, pubKey, normalized, amount, txID, "completed", now, now)
-	log.Printf("nostr funds sent: type=withdrawal amount=%s from=%s to=%s txid=%s", formatSikka(amount), shortNPub(pubKey), normalized, txID)
-	return b.queueAndFlush(ctx, pubKey, "withdrawal", fmt.Sprintf("Withdrawal sent: %s SIKKA\nAddress: %s\nTx: %s", formatSikka(amount), normalized, txID))
+	log.Printf("nostr funds sent: type=withdrawal amount=%s from=%s to=%s txid=%s", formatSikkaDisplay(amount), shortNPub(pubKey), normalized, txID)
+	return b.queueAndFlush(ctx, pubKey, "withdrawal", fmt.Sprintf("Withdrawal sent: %s\nAddress: %s\nTx: %s", formatSikkaDisplay(amount), normalized, txID))
 }
 
 func (b *Bot) reserveWithdrawal(ctx context.Context, requestEventID, pubKey, address string, amount int64) (int64, error) {
@@ -1184,14 +1184,23 @@ func (b *Bot) publishTextNote(ctx context.Context, message string, tags nostr.Ta
 
 func helpMessage() string {
 	return strings.Join([]string{
-		"Commands:",
-		"help",
-		"balance",
-		"deposit",
-		"address set <sikka-address>",
-		"withdraw all <address>",
-		"withdraw <amount> <address>",
+		"SIKKA Nostr wallet",
+		"",
+		"Available commands:",
+		"help - show this message",
+		"balance - check your current on-chain wallet balance",
+		"deposit - get your personal SIKKA deposit address",
+		"address set <sikka-address> - save a default withdrawal address",
+		"withdraw all <address> - send your full wallet balance",
+		"withdraw <amount> <address> - send a specific amount",
+		"",
 		"Amounts without a decimal are atomic units. Decimals are interpreted as SIKKA.",
+		"",
+		"Project and source:",
+		"https://gitworkshop.dev/npub1x6au4qgw9t403yushl34tgngmgcaqv9yna7ywf8e6x4xf686ln7qc7y6wq/sikka",
+		"",
+		"Open the full wallet interface:",
+		"https://sikka.click",
 	}, "\n")
 }
 

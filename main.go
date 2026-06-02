@@ -916,9 +916,9 @@ func (b *Bot) handleMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 
 	s.ChannelMessageSendReply(m.ChannelID, fmt.Sprintf( //nolint:errcheck
-		"<@%s> Sent **%s SIKKA** to `%s`\nTx: `%s`",
+		"<@%s> Sent **%s** to `%s`\nTx: `%s`",
 		userID,
-		formatSikka(sentAmount),
+		formatSikkaDisplay(sentAmount),
 		recipientAddr,
 		txID,
 	), m.Reference())
@@ -931,6 +931,17 @@ func formatSikka(chillar int64) string {
 		frac = -frac
 	}
 	return fmt.Sprintf("%d.%010d", whole, frac)
+}
+
+func formatSikkaDisplay(chillar int64) string {
+	abs := chillar
+	if abs < 0 {
+		abs = -abs
+	}
+	if abs < subunitsPerSikka {
+		return fmt.Sprintf("%d chillar", chillar)
+	}
+	return fmt.Sprintf("%s SIKKA", formatSikka(chillar))
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────

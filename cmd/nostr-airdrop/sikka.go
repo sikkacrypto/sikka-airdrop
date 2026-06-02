@@ -746,3 +746,14 @@ func formatSikka(chillar int64) string {
 	}
 	return fmt.Sprintf("%d.%010d", whole, frac)
 }
+
+func formatSikkaDisplay(chillar int64) string {
+	abs := chillar
+	if abs < 0 {
+		abs = -abs
+	}
+	if abs < subunitsPerSikka {
+		return fmt.Sprintf("%d chillar", chillar)
+	}
+	return fmt.Sprintf("%s SIKKA", formatSikka(chillar))
+}
