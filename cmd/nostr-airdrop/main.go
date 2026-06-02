@@ -574,6 +574,22 @@ func findReplyEventID(tags nostr.Tags) string {
 	return fallback
 }
 
+func findRootEventID(tags nostr.Tags) string {
+	for _, tag := range tags {
+		if len(tag) < 4 || tag[0] != "e" {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(tag[3]), "root") {
+			return strings.TrimSpace(tag[1])
+		}
+	}
+	return findReplyEventID(tags)
+}
+
+func buildSikkaTxURL(txID string) string {
+	return "https://sikka.click/tx/" + strings.TrimSpace(txID)
+}
+
 func parseAmount(raw string) (int64, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
@@ -698,6 +714,35 @@ func (b *Bot) processTip(ctx context.Context, event *nostr.Event, recipientPubKe
 		return fmt.Errorf("tip amount above maximum")
 	}
 
+	if err := b.reserveTip(ctx, event.ID, event.PubKey, recipientPubKey, amount); err != nil {
+		return err
+	}
+
+	txID, err := sendExactAmount(b.cfg.SelectedNode, b.treasury, recipient.DepositAddress, amount)
+	if err != nil {
+		if refundErr := b.failTip(event.ID, event.PubKey, amount); refundErr != nil {
+			return fmt.Errorf("tip send failed: %v; refund failed: %w", err, refundErr)
+		}
+		return fmt.Errorf("tip send failed: %w", err)
+	}
+
+	if err := b.completeTip(event.ID, event.PubKey); err != nil {
+		return err
+	}
+	log.Printf("nostr funds sent: type=tip amount=%s from=%s to=%s txid=%s", formatSikka(amount), shortNPub(event.PubKey), shortNPub(recipient.PubKey), txID)
+	b.publishTipReceipt(ctx, event, recipient.PubKey, amount, txID)
+
+	txURL := buildSikkaTxURL(txID)
+	if err := b.queueDM(recipientPubKey, "tip-received", fmt.Sprintf("You received %s SIKKA from %s.\nTx: %s\nView: %s", formatSikka(amount), shortNPub(event.PubKey), txID, txURL)); err != nil {
+		return err
+	}
+	if err := b.queueDM(event.PubKey, "tip-sent", fmt.Sprintf("You sent %s SIKKA to %s.\nTx: %s\nView: %s", formatSikka(amount), shortNPub(recipient.PubKey), txID, txURL)); err != nil {
+		return err
+	}
+	return b.flushOutbox(ctx)
+}
+
+func (b *Bot) reserveTip(ctx context.Context, eventID, senderPubKey, recipientPubKey string, amount int64) error {
 	tx, err := b.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -705,7 +750,7 @@ func (b *Bot) processTip(ctx context.Context, event *nostr.Event, recipientPubKe
 	defer tx.Rollback()
 
 	now := time.Now().Unix()
-	result, err := tx.Exec(`UPDATE balances SET available = available - ?, updated_at = ? WHERE pubkey = ? AND available >= ?`, amount, now, event.PubKey, amount)
+	result, err := tx.Exec(`UPDATE balances SET available = available - ?, pending = pending + ?, updated_at = ? WHERE pubkey = ? AND available >= ?`, amount, amount, now, senderPubKey, amount)
 	if err != nil {
 		return err
 	}
@@ -716,24 +761,68 @@ func (b *Bot) processTip(ctx context.Context, event *nostr.Event, recipientPubKe
 	if affected != 1 {
 		return fmt.Errorf("insufficient balance")
 	}
-	if _, err := tx.Exec(`UPDATE balances SET available = available + ?, updated_at = ? WHERE pubkey = ?`, amount, now, recipientPubKey); err != nil {
+	if _, err := tx.Exec(`INSERT INTO tips (event_id, sender_pubkey, recipient_pubkey, amount, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`, eventID, senderPubKey, recipientPubKey, amount, "pending", now); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO tips (event_id, sender_pubkey, recipient_pubkey, amount, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`, event.ID, event.PubKey, recipientPubKey, amount, "credited", now); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	log.Printf("nostr funds sent: type=tip amount=%s from=%s to=%s event_id=%s", formatSikka(amount), shortNPub(event.PubKey), shortNPub(recipient.PubKey), event.ID)
+	return tx.Commit()
+}
 
-	if err := b.queueDM(recipientPubKey, "tip-received", fmt.Sprintf("You received %s SIKKA from %s.", formatSikka(amount), shortNPub(event.PubKey))); err != nil {
+func (b *Bot) completeTip(eventID, senderPubKey string) error {
+	tx, err := b.db.BeginTx(context.Background(), nil)
+	if err != nil {
 		return err
 	}
-	if err := b.queueDM(event.PubKey, "tip-sent", fmt.Sprintf("You sent %s SIKKA to %s.", formatSikka(amount), shortNPub(recipient.PubKey))); err != nil {
+	defer tx.Rollback()
+
+	now := time.Now().Unix()
+	if _, err := tx.Exec(`UPDATE tips SET status = ? WHERE event_id = ?`, "submitted", eventID); err != nil {
 		return err
 	}
-	return b.flushOutbox(ctx)
+	if _, err := tx.Exec(`UPDATE balances SET pending = pending - COALESCE((SELECT amount FROM tips WHERE event_id = ?), 0), updated_at = ? WHERE pubkey = ?`, eventID, now, senderPubKey); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (b *Bot) failTip(eventID, senderPubKey string, amount int64) error {
+	tx, err := b.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	now := time.Now().Unix()
+	if _, err := tx.Exec(`UPDATE tips SET status = ? WHERE event_id = ?`, "failed", eventID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE balances SET available = available + ?, pending = pending - ?, updated_at = ? WHERE pubkey = ?`, amount, amount, now, senderPubKey); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (b *Bot) publishTipReceipt(ctx context.Context, tipEvent *nostr.Event, recipientPubKey string, amount int64, txID string) {
+	if tipEvent == nil {
+		return
+	}
+	message := fmt.Sprintf("Tip sent: %s SIKKA to %s\nTx: %s\n%s", formatSikka(amount), fullNPub(recipientPubKey), txID, buildSikkaTxURL(txID))
+	_ = b.publishTextNote(ctx, message, buildReplyTags(tipEvent, recipientPubKey))
+}
+
+func buildReplyTags(event *nostr.Event, recipientPubKey string) nostr.Tags {
+	if event == nil {
+		return nil
+	}
+	tags := make(nostr.Tags, 0, 4)
+	if rootEventID := findRootEventID(event.Tags); rootEventID != "" && rootEventID != event.ID {
+		tags = append(tags, nostr.Tag{"e", rootEventID, "", "root"})
+	}
+	tags = append(tags, nostr.Tag{"e", event.ID, "", "reply"})
+	tags = append(tags, nostr.Tag{"p", event.PubKey})
+	if recipientPubKey != "" && recipientPubKey != event.PubKey {
+		tags = append(tags, nostr.Tag{"p", recipientPubKey})
+	}
+	return tags
 }
 
 func (b *Bot) processDM(ctx context.Context, event *nostr.Event, plaintext string) error {
@@ -1120,6 +1209,29 @@ func (b *Bot) sendDM(ctx context.Context, recipientPubKey, message string) error
 	return nil
 }
 
+func (b *Bot) publishTextNote(ctx context.Context, message string, tags nostr.Tags) error {
+	event := nostr.Event{
+		CreatedAt: nostr.Now(),
+		Kind:      nostr.KindTextNote,
+		Tags:      tags,
+		Content:   message,
+	}
+	if err := event.Sign(b.cfg.NostrSecret); err != nil {
+		return err
+	}
+	results := b.pool.PublishMany(ctx, b.cfg.RelayURLs, event)
+	success := false
+	for result := range results {
+		if result.Error == nil {
+			success = true
+		}
+	}
+	if !success {
+		return fmt.Errorf("publish failed on all relays")
+	}
+	return nil
+}
+
 func helpMessage() string {
 	return strings.Join([]string{
 		"Commands:",
@@ -1142,6 +1254,14 @@ func shortNPub(pubKey string) string {
 		return npub
 	}
 	return npub[:12] + "..." + npub[len(npub)-6:]
+}
+
+func fullNPub(pubKey string) string {
+	npub, err := nip19.EncodePublicKey(pubKey)
+	if err != nil {
+		return shortNPub(pubKey)
+	}
+	return "nostr:" + npub
 }
 
 func previewText(value string, maxLen int) string {

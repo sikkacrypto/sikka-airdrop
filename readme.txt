@@ -113,6 +113,10 @@ the recipient from the parent event author. If no amount is provided, the
 worker uses 1% of the sender's available internal balance. If the parent event
 cannot be resolved from reply tags, the command must include an explicit npub.
 
+Successful public tips also trigger a public in-thread receipt reply from the
+bot. Public tips are sent on-chain to the recipient's deterministic deposit
+wallet, and the receipt includes the txid plus a sikka.click transaction link.
+
 Nostr Intake Safety Rules
 ------------------------
 Incoming Nostr events are guarded in two ways:
