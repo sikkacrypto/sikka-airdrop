@@ -1184,7 +1184,7 @@ func (b *Bot) publishTextNote(ctx context.Context, message string, tags nostr.Ta
 
 func helpMessage() string {
 	return strings.Join([]string{
-		"SIKKA Nostr wallet",
+		"SIKKA NOSTR BOT",
 		"",
 		"Available commands:",
 		"help - show this message",
