@@ -580,7 +580,7 @@ func findRootEventID(tags nostr.Tags) string {
 }
 
 func buildSikkaTxURL(txID string) string {
-	return "https://sikka.click/tx/" + strings.TrimSpace(txID)
+	return "https://node.sikka.click/tx/" + strings.TrimSpace(txID)
 }
 
 func parseAmount(raw string) (int64, error) {
@@ -1196,10 +1196,7 @@ func helpMessage() string {
 		"",
 		"Amounts without a decimal are atomic units. Decimals are interpreted as SIKKA.",
 		"",
-		"Project and source:",
-		"https://gitworkshop.dev/npub1x6au4qgw9t403yushl34tgngmgcaqv9yna7ywf8e6x4xf686ln7qc7y6wq/sikka",
-		"",
-		"Open the full wallet interface:",
+		"Use SIKKA:",
 		"https://sikka.click",
 	}, "\n")
 }
