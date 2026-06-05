@@ -68,13 +68,14 @@ type TxOutput struct {
 }
 
 type Transaction struct {
-	ID        string     `json:"id,omitempty"`
-	Parents   []string   `json:"parents"`
-	Inputs    []TxInput  `json:"inputs"`
-	Outputs   []TxOutput `json:"outputs"`
-	PowNonce  int64      `json:"pow_nonce"`
-	PowBits   int        `json:"pow_bits"`
-	Timestamp int64      `json:"timestamp"`
+	ID                string     `json:"id,omitempty"`
+	Parents           []string   `json:"parents"`
+	ParentPowHashes   []string   `json:"parent_pow_hashes,omitempty"`
+	Inputs            []TxInput  `json:"inputs"`
+	Outputs           []TxOutput `json:"outputs"`
+	PowNonce          int64      `json:"pow_nonce"`
+	PowBits           int        `json:"pow_bits"`
+	Timestamp         int64      `json:"timestamp"`
 }
 
 type UTXO struct {
@@ -102,13 +103,15 @@ type PowQuoteRequest struct {
 }
 
 type PowQuoteResponse struct {
-	RequiredBits      int `json:"required_bits"`
-	BaseBits          int `json:"base_bits"`
-	RecentCount       int `json:"recent_count"`
-	CongestionBuckets int `json:"congestion_buckets"`
-	WindowSeconds     int `json:"window_seconds"`
-	BucketTx          int `json:"bucket_tx"`
-	BucketBits        int `json:"bucket_bits"`
+	RequiredBits      int      `json:"required_bits"`
+	BaseBits          int      `json:"base_bits"`
+	RecentCount       int      `json:"recent_count"`
+	CongestionBuckets int      `json:"congestion_buckets"`
+	WindowSeconds     int64    `json:"window_seconds"`
+	BucketTx          int      `json:"bucket_tx"`
+	BucketBits        int      `json:"bucket_bits"`
+	OverrideBits      int      `json:"override_bits,omitempty"`
+	ParentPowHashes   []string `json:"parent_pow_hashes"`
 }
 
 type SubmitResponse struct {
@@ -310,6 +313,42 @@ func computeTxIDRaw(tx *Transaction) [32]byte {
 	return sha3.Sum256(buf)
 }
 
+// txPowHash computes the SHA3-256 proof-of-work hash for a transaction.
+// It hashes the stable txID, the two parent PoW hashes (tips commitment), and the
+// pow_nonce. ParentPowHashes must be populated (from PoW quote) before mining.
+func txPowHash(tx *Transaction) ([32]byte, error) {
+	txIDBytes := computeTxIDRaw(tx)
+
+	var p0, p1 [32]byte
+	if len(tx.ParentPowHashes) >= 1 {
+		if len(tx.ParentPowHashes[0]) != 64 {
+			return [32]byte{}, fmt.Errorf("parent_pow_hashes[0] must be 64 hex chars")
+		}
+		b, err := hex.DecodeString(tx.ParentPowHashes[0])
+		if err != nil {
+			return [32]byte{}, fmt.Errorf("parent_pow_hashes[0]: %w", err)
+		}
+		copy(p0[:], b)
+	}
+	if len(tx.ParentPowHashes) >= 2 {
+		if len(tx.ParentPowHashes[1]) != 64 {
+			return [32]byte{}, fmt.Errorf("parent_pow_hashes[1] must be 64 hex chars")
+		}
+		b, err := hex.DecodeString(tx.ParentPowHashes[1])
+		if err != nil {
+			return [32]byte{}, fmt.Errorf("parent_pow_hashes[1]: %w", err)
+		}
+		copy(p1[:], b)
+	}
+
+	var buf [32 + 32 + 32 + 8]byte
+	copy(buf[0:32], txIDBytes[:])
+	copy(buf[32:64], p0[:])
+	copy(buf[64:96], p1[:])
+	binary.BigEndian.PutUint64(buf[96:], uint64(tx.PowNonce))
+	return sha3.Sum256(buf[:]), nil
+}
+
 func signingPayload(tx *Transaction, inputIndex int, utxo *UTXO) []byte {
 	txID := computeTxIDRaw(tx)
 	addrBytes := []byte(utxo.Address)
@@ -329,13 +368,13 @@ func signingPayload(tx *Transaction, inputIndex int, utxo *UTXO) []byte {
 func minePoW(tx *Transaction, minBits int) error {
 	for nonce := int64(0); ; nonce++ {
 		tx.PowNonce = nonce
-		txID := computeTxIDRaw(tx)
-		var buf [40]byte
-		copy(buf[:32], txID[:])
-		binary.BigEndian.PutUint64(buf[32:], uint64(nonce))
-		hash := sha3.Sum256(buf[:])
-		if leadingZeroBits(hash[:]) >= minBits {
-			tx.PowBits = leadingZeroBits(hash[:])
+		hash, err := txPowHash(tx)
+		if err != nil {
+			return err
+		}
+		bits := leadingZeroBits(hash[:])
+		if bits >= minBits {
+			tx.PowBits = bits
 			return nil
 		}
 	}
@@ -479,7 +518,10 @@ func doNodeRequest(method, url string, body []byte) (*http.Response, error) {
 }
 
 func getAddressInfo(nodeURL, address string) (*AddressInfo, error) {
-	url := fmt.Sprintf("%s/v1/address/%s", strings.TrimRight(nodeURL, "/"), address)
+	// Use max page size to retrieve as many UTXOs as possible in one request.
+	// The server caps at 500; for very high UTXO counts we would need to page,
+	// but 500 is sufficient for practical airdrop/tip wallet usage.
+	url := fmt.Sprintf("%s/v1/address/%s?limit=500", strings.TrimRight(nodeURL, "/"), address)
 	resp, err := doNodeRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("GET address: %w", err)
@@ -489,9 +531,26 @@ func getAddressInfo(nodeURL, address string) (*AddressInfo, error) {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("GET address %d: %s", resp.StatusCode, body)
 	}
-	var info AddressInfo
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+
+	// New API returns paginated envelope: { "items": [...], "page": {...}, "meta": {address, balance, utxo_count} }
+	type addressEnvelope struct {
+		Items []UTXO `json:"items"`
+		Meta  struct {
+			Address   string `json:"address"`
+			Balance   int64  `json:"balance"`
+			UTXOCount int    `json:"utxo_count"`
+		} `json:"meta"`
+	}
+	var env addressEnvelope
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
 		return nil, fmt.Errorf("decode address info: %w", err)
+	}
+
+	info := AddressInfo{
+		Address:   env.Meta.Address,
+		Balance:   env.Meta.Balance,
+		UTXOCount: env.Meta.UTXOCount,
+		UTXOs:     env.Items,
 	}
 	if info.UTXOs == nil {
 		info.UTXOs = []UTXO{}
@@ -499,9 +558,8 @@ func getAddressInfo(nodeURL, address string) (*AddressInfo, error) {
 	if info.Address != "" && info.Address != address {
 		return nil, fmt.Errorf("address response mismatch: requested %s, got %s", address, info.Address)
 	}
-	if info.UTXOCount != 0 && info.UTXOCount != len(info.UTXOs) {
-		return nil, fmt.Errorf("address response mismatch: utxo_count=%d, utxos=%d", info.UTXOCount, len(info.UTXOs))
-	}
+	// Note: with limit we may have fewer UTXOs than utxo_count if >500; selection
+	// will still work as long as the returned prefix covers the spend amount.
 	return &info, nil
 }
 
@@ -661,6 +719,9 @@ func getPowQuote(nodeURL string, tx *Transaction) (*PowQuoteResponse, error) {
 	if quote.RequiredBits < 0 {
 		return nil, fmt.Errorf("invalid pow quote: required_bits=%d", quote.RequiredBits)
 	}
+	if len(quote.ParentPowHashes) != 2 {
+		return nil, fmt.Errorf("pow quote missing or invalid parent_pow_hashes (expected 2)")
+	}
 	return &quote, nil
 }
 
@@ -816,6 +877,8 @@ func (b *Bot) sendAirdrop(recipientAddr string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("quote PoW: %w", err)
 	}
+	tx.ParentPowHashes = make([]string, len(quote.ParentPowHashes))
+	copy(tx.ParentPowHashes, quote.ParentPowHashes)
 
 	// Mine PoW using the node's live congestion-adjusted requirement.
 	log.Printf("mining PoW (%d bits) for airdrop to %s...", quote.RequiredBits, recipientAddr)

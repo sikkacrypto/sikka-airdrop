@@ -43,13 +43,16 @@ Node API Compatibility
 ----------------------
   This bot expects the current node HTTP API and uses these routes:
 
-  GET  /v1/address/{address}
+  GET  /v1/address/{address}?limit=500
   GET  /v1/status (uses the tips field from the status response)
   POST /v1/tx/pow-quote
   POST /v1/tx/submit
 
-  The address response should include: address, balance, utxo_count, utxos.
-  The PoW quote response should include: required_bits.
+  The address response is a paginated envelope with "items" (UTXOs) and "meta"
+  containing address, balance, utxo_count. Use ?limit=500 for best coverage.
+  The PoW quote response includes: required_bits plus parent_pow_hashes (2 hex strings)
+  which must be copied to the tx before mining PoW. The PoW hash input now commits
+  to parent_pow_hashes to bind work to current tips (anti-selfish-mining).
 
 Build
 -----
