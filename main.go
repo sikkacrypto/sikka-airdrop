@@ -33,7 +33,7 @@ const (
 	bech32mConstant  = uint32(0x2bc830a3)
 	bech32Charset    = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 	signingDomain    = "sikka:v2:txinput"
-	claimCooldown    = 2 * time.Hour
+	claimCooldown    = 6 * time.Hour
 	airdropDivisor   = int64(1_000_000)
 	nodeHTTPTimeout  = 10 * time.Second
 	nodeMaxAttempts  = 3
