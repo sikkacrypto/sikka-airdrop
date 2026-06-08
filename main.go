@@ -34,7 +34,7 @@ const (
 	bech32Charset    = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 	signingDomain    = "sikka:v2:txinput"
 	claimCooldown    = 6 * time.Hour
-	airdropDivisor   = int64(1_000_000)
+	airdropDivisor   = int64(100_000)
 	nodeHTTPTimeout  = 10 * time.Second
 	nodeMaxAttempts  = 3
 	nodeRetryDelay   = 500 * time.Millisecond
@@ -810,10 +810,10 @@ func (b *Bot) sendAirdrop(recipientAddr string) (string, error) {
 		return "", fmt.Errorf("faucet is empty")
 	}
 
-	// 0.0001% of balance = balance / 1000000
+	// 0.001% of balance = balance / 100000
 	amount := info.Balance / airdropDivisor
 	if amount < 1 {
-		return "", fmt.Errorf("faucet balance too low to send (0.0001%% = %d chillar)", amount)
+		return "", fmt.Errorf("faucet balance too low to send (0.001%% = %d chillar)", amount)
 	}
 
 	// Select UTXOs greedily
